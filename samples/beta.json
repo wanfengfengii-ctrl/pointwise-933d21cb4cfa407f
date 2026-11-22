@@ -1,0 +1,12 @@
+{
+  "job": "materials-17",
+  "station": "beta",
+  "commands": ["p", "q"],
+  "opening": "beta-ready",
+  "actions": [
+    {"row_id": "b-01", "source": "beta-ready", "target": "beta-ready", "kind": "public", "label": "p", "reading": "coupon checked during run"}
+  ],
+  "witnesses": [
+    {"row_id": "bw-01", "action_id": "b-01", "note": "run observation qualified"}
+  ]
+}

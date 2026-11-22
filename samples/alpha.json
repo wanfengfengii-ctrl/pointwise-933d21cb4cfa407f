@@ -1,0 +1,16 @@
+{
+  "job": "materials-17",
+  "station": "alpha",
+  "commands": ["p", "q"],
+  "opening": "alpha-ready",
+  "actions": [
+    {"row_id": "a-01", "source": "alpha-ready", "target": "alpha-ready", "kind": "public", "label": "p", "reading": "ordinary run"},
+    {"row_id": "a-02", "source": "alpha-ready", "target": "alpha-gate", "kind": "local", "label": "check coupon", "reading": "coupon inspected"},
+    {"row_id": "a-03", "source": "alpha-gate", "target": "alpha-spent", "kind": "public", "label": "p", "reading": "recorded exit from gate"},
+    {"row_id": "a-04", "source": "alpha-spent", "target": "alpha-spent", "kind": "public", "label": "p", "reading": "run after bypass"}
+  ],
+  "witnesses": [
+    {"row_id": "aw-01", "action_id": "a-02", "note": "coupon observation qualified"}
+  ],
+  "correction": {"action_id": "a-03", "target": "alpha-ready"}
+}
