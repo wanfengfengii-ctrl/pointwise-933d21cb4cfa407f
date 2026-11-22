@@ -2,9 +2,15 @@ import json
 import sqlite3
 from pathlib import Path
 
+from qualification.panel import PanelResult
 from qualification.result import QualificationResult
 from records.identity import is_record_number
-from reports.receipt import PublicationReceipt, ReportSnapshot, make_snapshot
+from reports.receipt import (
+    PanelSnapshot,
+    PublicationReceipt,
+    ReportSnapshot,
+    make_snapshot,
+)
 
 
 _SCHEMA = (
@@ -23,6 +29,25 @@ _SCHEMA = (
     )''',
     '''CREATE TABLE IF NOT EXISTS publications (
         report_number INTEGER PRIMARY KEY REFERENCES reports(number),
+        event TEXT NOT NULL CHECK (event = 'issued')
+    )''',
+    '''CREATE TABLE IF NOT EXISTS panel_reports (
+        number INTEGER PRIMARY KEY,
+        job TEXT NOT NULL,
+        permissions TEXT NOT NULL,
+        max_steps INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('guaranteed', 'impossible')),
+        strategy TEXT
+    )''',
+    '''CREATE TABLE IF NOT EXISTS panel_report_parents (
+        report_number INTEGER NOT NULL REFERENCES panel_reports(number),
+        position INTEGER NOT NULL CHECK (position IN (0, 1)),
+        station TEXT NOT NULL,
+        artifact TEXT NOT NULL,
+        PRIMARY KEY (report_number, position)
+    )''',
+    '''CREATE TABLE IF NOT EXISTS panel_publications (
+        report_number INTEGER PRIMARY KEY REFERENCES panel_reports(number),
         event TEXT NOT NULL CHECK (event = 'issued')
     )''',
 )
@@ -99,5 +124,70 @@ class ReportStore:
             (left, right),
             tuple(json.loads(permissions)),
             tuple(json.loads(starts)),
+            PublicationReceipt(number, event),
+        )
+
+    def publish_panel(self, result: PanelResult) -> PanelSnapshot:
+        request = result.request
+        permissions = _pack(request.permissions)
+        strategy = None if result.strategy is None else _pack(result.strategy)
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            cursor = self.connection.execute(
+                '''INSERT INTO panel_reports(job, permissions, max_steps, status, strategy)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (request.left.identity.job, permissions, request.max_steps, result.status, strategy),
+            )
+            number = cursor.lastrowid
+            snapshot = PanelSnapshot(
+                number,
+                request.left.identity.job,
+                (request.left.identity.station, request.right.identity.station),
+                (request.left.raw, request.right.raw),
+                request.permissions,
+                request.max_steps,
+                result.status,
+                result.strategy,
+                PublicationReceipt(number, 'issued'),
+            )
+            self.connection.executemany(
+                '''INSERT INTO panel_report_parents(report_number, position, station, artifact)
+                   VALUES (?, ?, ?, ?)''',
+                (
+                    (number, position, station, artifact)
+                    for position, (station, artifact) in enumerate(zip(snapshot.stations, snapshot.parents))
+                ),
+            )
+            self.connection.execute(
+                'INSERT INTO panel_publications(report_number, event) VALUES (?, ?)',
+                (number, snapshot.receipt.event),
+            )
+        return snapshot
+
+    def load_panel(self, number: int) -> PanelSnapshot | None:
+        if not is_record_number(number):
+            return None
+        row = self.connection.execute(
+            '''SELECT r.job, r.permissions, r.max_steps, r.status, r.strategy,
+                      l.station, l.artifact, b.station, b.artifact, p.event
+               FROM panel_reports AS r
+               JOIN panel_report_parents AS l ON l.report_number = r.number AND l.position = 0
+               JOIN panel_report_parents AS b ON b.report_number = r.number AND b.position = 1
+               JOIN panel_publications AS p ON p.report_number = r.number
+               WHERE r.number = ?''',
+            (number,),
+        ).fetchone()
+        if row is None:
+            return None
+        job, permissions, max_steps, status, strategy, left_station, left, right_station, right, event = row
+        return PanelSnapshot(
+            number,
+            job,
+            (left_station, right_station),
+            (left, right),
+            tuple(json.loads(permissions)),
+            max_steps,
+            status,
+            None if strategy is None else json.loads(strategy),
             PublicationReceipt(number, event),
         )

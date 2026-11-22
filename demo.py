@@ -3,14 +3,15 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from evidence.acceptance import accept_station
-from evidence.freeze import freeze_station
+from evidence.acceptance import accept_panel, accept_station
+from evidence.freeze import freeze_panel, freeze_station
+from panel_fixtures import CATALOG, stage_sources
 from records.identity import StationKey
 from records.intake import accept_revision
 from records.readings import ActionRow, RevisionDraft, WitnessRow
 from records.storage import RevisionStore
-from reports.publish import issue_report
-from reports.retrieve import read_report
+from reports.publish import issue_panel, issue_report
+from reports.retrieve import read_panel, read_report
 from reports.storage import ReportStore
 from review.commands import CommandCatalog
 from review.script_check import review_script
@@ -57,7 +58,8 @@ def _correct(path, station, parent, draft, correction):
         return new, freeze_station(source, new)
 
 
-def main():
+def legacy_v1_demo():
+    """Original V1 station replay, kept runnable alongside the panel scheme."""
     alpha, alpha_catalog, alpha_draft, correction = _load_sample('alpha.json')
     beta, beta_catalog, beta_draft, _ = _load_sample('beta.json')
     with tempfile.TemporaryDirectory(prefix='station-replay-') as folder:
@@ -71,7 +73,6 @@ def main():
         with ReportStore(report_path) as reports:
             reports.initialize()
             old = issue_report(reports, first_parent, second_station, {'p'})
-
         new_key, new_raw = _correct(alpha_path, alpha, old_key, alpha_draft, correction)
         new_parent = accept_station(new_raw, alpha.job, alpha.station)
         with ReportStore(report_path) as reports:
@@ -81,34 +82,89 @@ def main():
             reopened.initialize()
             old_snapshot = read_report(reopened, old.number)
             new_snapshot = read_report(reopened, new.number)
+    return old, new, old_snapshot, new_snapshot
 
-        expected = [[], ['p']]
-        actual = [list(old.first_commands), list(new.first_commands)]
-        if actual != expected:
-            raise SystemExit(f'REPEAT_QUALIFICATION_MISMATCH actual={actual!r} expected={expected!r}')
-        if old_snapshot != old or new_snapshot != new:
-            raise RuntimeError('historical receipt differs after reopening')
-        actual_downstream = [
-            accept_station(old_snapshot.parents[0], alpha.job, alpha.station).identity.revision,
-            accept_station(new_snapshot.parents[0], alpha.job, alpha.station).identity.revision,
-        ]
-        expected_downstream = [old_key.number, new_key.number]
-        if actual_downstream != expected_downstream:
-            raise RuntimeError('historical receipt has the wrong source revision')
-        print('POINTWISE_SCENARIO ' + json.dumps({
-            'case_id': 'normal_pair.offline_variants',
-            'input': {'job': alpha.job, 'permissions': ['p'], 'alpha_bypass_returns': [False, True]},
-            'expected': expected,
-            'actual': actual,
-            'downstream_expected': expected_downstream,
-            'downstream_actual': actual_downstream,
-            'code_paths': [
-                'evidence/freeze.py', 'qualification/result.py', 'reports/storage.py', 'reports/retrieve.py',
-            ],
-            'oracle': 'Hand trace: first bypass leaves the witness behind; the corrected bypass returns to the inspection opening. Beta witnesses every p. Each report keeps the selected alpha revision.',
-        }, ensure_ascii=False, sort_keys=True))
-        print(f'Report {old_snapshot.number}: {list(old_snapshot.first_commands)}')
-        print(f'Report {new_snapshot.number}: {list(new_snapshot.first_commands)}')
+
+def _lamp_paths(strategy):
+    """List observable lamp histories and the command that closes each one."""
+    found = {}
+
+    def walk(node, history):
+        for lamp, child in node['next'].items():
+            branch = history + (int(lamp),)
+            if 'stop' in child:
+                found[branch] = node['command']
+            else:
+                walk(child, branch)
+
+    walk(strategy, ())
+    return found
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix='panel-retest-') as folder:
+        root = Path(folder)
+        # stage_sources opens both station stores and closes them before returning.
+        raws = stage_sources(
+            root / 'alpha.sqlite3', root / 'beta.sqlite3', freeze_panel
+        )
+        left = accept_panel(raws['alpha'], CATALOG.job, 'alpha')
+        original = accept_panel(raws['beta'], CATALOG.job, 'beta')
+        corrected = accept_panel(raws['beta_reversed'], CATALOG.job, 'beta')
+        report_path = root / 'reports.sqlite3'
+        with ReportStore(report_path) as reports:
+            reports.initialize()
+            first = issue_panel(reports, left, original, CATALOG.commands, 3)
+            second = issue_panel(reports, left, corrected, CATALOG.commands, 3)
+        with ReportStore(report_path) as reopened:
+            reopened.initialize()
+            first_again = read_panel(reopened, first.number)
+            second_again = read_panel(reopened, second.number)
+            first_parents = (
+                accept_panel(first_again.parents[0], CATALOG.job, 'alpha').identity.revision,
+                accept_panel(first_again.parents[1], CATALOG.job, 'beta').identity.revision,
+            )
+            second_parents = (
+                accept_panel(second_again.parents[0], CATALOG.job, 'alpha').identity.revision,
+                accept_panel(second_again.parents[1], CATALOG.job, 'beta').identity.revision,
+            )
+
+    original_paths = _lamp_paths(first.strategy)
+    corrected_paths = _lamp_paths(second.strategy)
+    shared = sorted({history[:2] for history in original_paths} & {history[:2] for history in corrected_paths})
+    if not shared:
+        raise SystemExit('the two revisions do not share a lamp history')
+    shared = shared[0]
+    expected = {
+        'original': original_paths[shared + (0,)],
+        'corrected': corrected_paths[shared + (0,)],
+    }
+    if expected != {'original': 's', 'corrected': 'r'}:
+        raise SystemExit(f'PANEL_CORRECTION_MISMATCH actual={expected!r} expected={{original: s, corrected: r}}')
+    if (first_again, second_again) != (first, second):
+        raise RuntimeError('panel report changed after reopening')
+    print('PANEL_SCENARIO ' + json.dumps({
+        'case_id': 'panel.beta_lamp_correction',
+        'shared_lamp_history': list(shared),
+        'final_step': expected,
+        'reports': [first.number, second.number],
+        'statuses': [first.status, second.status],
+        'original_parent_revisions': list(first_parents),
+        'corrected_parent_revisions': list(second_parents),
+        'oracle': (
+            'Both revisions see the same p and q lamps; for lamp history '
+            f'{list(shared)} the original beta can only finish with s while the '
+            'corrected beta can only finish with r.'
+        ),
+    }, ensure_ascii=False, sort_keys=True))
+    print(f'Shared lamp history {list(shared)}: original -> {expected["original"]}, '
+          f'corrected -> {expected["corrected"]}')
+    print(f'Report {first.number}: {first.status} (original beta parent revision {first_parents[1]})')
+    print(f'Report {second.number}: {second.status} (corrected beta parent revision {second_parents[1]})')
+    print('V1 legacy demo:')
+    old, new, old_snapshot, new_snapshot = legacy_v1_demo()
+    print(f'  Report {old_snapshot.number}: {list(old_snapshot.first_commands)}')
+    print(f'  Report {new_snapshot.number}: {list(new_snapshot.first_commands)}')
 
 
 if __name__ == '__main__':

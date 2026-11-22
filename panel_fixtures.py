@@ -3,14 +3,14 @@ import argparse
 import tempfile
 from pathlib import Path
 
-from evidence.acceptance import accept_station
-from evidence.freeze import freeze_station
+from evidence.acceptance import accept_panel, accept_station
+from evidence.freeze import freeze_panel, freeze_station
 from records.identity import StationKey
 from records.intake import accept_revision
 from records.readings import ActionRow, RevisionDraft, WitnessRow
 from records.storage import RevisionStore
-from reports.publish import issue_report
-from reports.retrieve import read_report
+from reports.publish import issue_panel, issue_report
+from reports.retrieve import read_panel, read_report
 from reports.storage import ReportStore
 from review.commands import CommandCatalog
 
@@ -108,8 +108,54 @@ def check_v1(alpha_path, beta_path, report_path):
     print(f"V1 offline reports {old.number}, {new.number}: [], []")
 
 
+def _final_steps(strategy):
+    found = {}
+
+    def walk(node, lamps):
+        for lamp, child in node["next"].items():
+            history = lamps + (int(lamp),)
+            if "stop" in child:
+                found[history] = node["command"]
+            else:
+                walk(child, history)
+
+    walk(strategy, ())
+    return found
+
+
+def check_v2(alpha_path, beta_path, report_path):
+    """Exercise the V2 panel path end to end and return the staged source texts."""
+    raw = stage_sources(alpha_path, beta_path, freeze_panel)
+    left = accept_panel(raw["alpha"], CATALOG.job, ALPHA.station)
+    right = accept_panel(raw["beta"], CATALOG.job, BETA.station)
+    corrected = accept_panel(raw["beta_reversed"], CATALOG.job, BETA.station)
+    with ReportStore(report_path) as reports:
+        reports.initialize()
+        two = issue_panel(reports, left, right, CATALOG.commands, 2)
+        old = issue_panel(reports, left, right, CATALOG.commands, 3)
+        new = issue_panel(reports, left, corrected, CATALOG.commands, 3)
+        if two.status != "impossible" or two.strategy is not None:
+            raise RuntimeError("V2 must not guarantee a two-step panel run")
+        old_steps = _final_steps(old.strategy)
+        new_steps = _final_steps(new.strategy)
+        expected_old = {(0, 0, 0): "s", (1, 0, 0): "r", (1, 1, 0): "t"}
+        expected_new = {(0, 0, 0): "r", (1, 0, 0): "s", (1, 1, 0): "t"}
+        if old_steps != expected_old or new_steps != expected_new:
+            raise RuntimeError(
+                f"V2 final steps {old_steps!r} / {new_steps!r} do not match the lamp correction"
+            )
+        old_again = read_panel(reports, old.number)
+        new_again = read_panel(reports, new.number)
+        if old_again != old or new_again != new:
+            raise RuntimeError("V2 reports changed after reopening")
+    print(f"V2 final steps original {sorted(old_steps.items())}")
+    print(f"V2 final steps corrected {sorted(new_steps.items())}")
+    print(f"V2 reports {old.number} impossible-at-2 / {new.number} guaranteed-at-3")
+    return raw
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Stage panel inputs and verify their V1 behavior")
+    parser = argparse.ArgumentParser(description="Stage panel inputs and verify their V1/V2 behavior")
     parser.add_argument("--memory", action="store_true", help="use independent in-memory databases")
     args = parser.parse_args()
     if args.memory:
@@ -118,6 +164,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="panel-fixtures-") as folder:
         root = Path(folder)
         check_v1(root / "alpha.sqlite3", root / "beta.sqlite3", root / "reports.sqlite3")
+        check_v2(
+            root / "alpha.sqlite3", root / "beta.sqlite3", root / "panel-reports.sqlite3"
+        )
 
 
 if __name__ == "__main__":

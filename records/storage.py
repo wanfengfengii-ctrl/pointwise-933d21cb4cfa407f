@@ -26,6 +26,11 @@ _SCHEMA = (
         revision INTEGER PRIMARY KEY REFERENCES revisions(number),
         artifact TEXT NOT NULL
     )''',
+    '''CREATE TABLE IF NOT EXISTS panel_issues (
+        revision INTEGER PRIMARY KEY REFERENCES revisions(number),
+        declaration TEXT NOT NULL,
+        artifact TEXT NOT NULL
+    )''',
 )
 
 

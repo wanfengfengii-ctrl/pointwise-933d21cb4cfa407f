@@ -20,6 +20,19 @@ class ReportSnapshot:
     receipt: PublicationReceipt
 
 
+@dataclass(frozen=True, slots=True)
+class PanelSnapshot:
+    number: int
+    job: str
+    stations: tuple[str, str]
+    parents: tuple[str, str]
+    permissions: tuple[str, ...]
+    max_steps: int
+    status: str
+    strategy: dict | None
+    receipt: PublicationReceipt
+
+
 def make_snapshot(number: int, result: QualificationResult) -> ReportSnapshot:
     left, right = result.request.left, result.request.right
     return ReportSnapshot(
